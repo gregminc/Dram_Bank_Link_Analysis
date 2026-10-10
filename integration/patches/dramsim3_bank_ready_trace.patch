@@ -1,0 +1,140 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eaa40bf..1f2a3de 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,10 @@
+ cmake_minimum_required(VERSION 3.0.0)
+ project(dramsim3)
+ 
++option(BANK_READY_TRACE
++  "Emit timestamped READ-issue events for downstream bank-link simulation"
++  OFF)
++
+ set(default_build_type "Release")
+ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+   message(STATUS "Setting build type to '${default_build_type}' as none was specified.")
+@@ -75,6 +79,10 @@ if (ADDR_TRACE)
+     target_compile_options(dramsim3 PRIVATE -DADDR_TRACE)
+ endif (ADDR_TRACE)
+ 
++if (BANK_READY_TRACE)
++    target_compile_definitions(dramsim3 PRIVATE BANK_READY_TRACE)
++endif (BANK_READY_TRACE)
++
+ 
+ target_include_directories(dramsim3 INTERFACE src)
+ target_compile_options(dramsim3 PRIVATE -Wall)
+diff --git a/src/controller.cc b/src/controller.cc
+index a582dcc..a44856c 100644
+--- a/src/controller.cc
++++ b/src/controller.cc
+@@ -2,6 +2,7 @@
+ #include <iomanip>
+ #include <iostream>
+ #include <limits>
++#include <stdexcept>
+ 
+ namespace dramsim3 {
+ 
+@@ -40,6 +41,20 @@ Controller::Controller(int channel, const Config &config, const Timing &timing)
+     std::cout << "Command Trace write to " << trace_file_name << std::endl;
+     cmd_trace_.open(trace_file_name, std::ofstream::out);
+ #endif  // CMD_TRACE
++
++#ifdef BANK_READY_TRACE
++    const std::string bank_ready_trace_name =
++        config_.output_dir + "ch_" + std::to_string(channel_id_) +
++        "_bank_ready.trace";
++    bank_ready_trace_.open(bank_ready_trace_name, std::ofstream::out);
++    if (!bank_ready_trace_) {
++        throw std::runtime_error("Unable to open bank-ready trace: " +
++                                 bank_ready_trace_name);
++    }
++    bank_ready_trace_ << "# ready_time_ns operation physical_address\n";
++    std::cout << "Bank-ready trace write to " << bank_ready_trace_name
++              << std::endl;
++#endif  // BANK_READY_TRACE
+ }
+ 
+ std::pair<uint64_t, int> Controller::ReturnDoneTrans(uint64_t clk) {
+@@ -230,6 +245,18 @@ void Controller::IssueCommand(const Command &cmd) {
+ #ifdef CMD_TRACE
+     cmd_trace_ << std::left << std::setw(18) << clk_ << " " << cmd << std::endl;
+ #endif  // CMD_TRACE
++#ifdef BANK_READY_TRACE
++    if (cmd.IsRead()) {
++        // READ issue time is used as a normalized ready-time boundary. Any
++        // fixed internal command-to-prefetch latency shifts all events equally
++        // and does not change steady-state link queueing or throughput.
++        const double issue_time_ns =
++            static_cast<double>(clk_) * config_.tCK;
++        bank_ready_trace_ << std::fixed << std::setprecision(6)
++                          << issue_time_ns << " Read 0x" << std::hex
++                          << cmd.hex_addr << std::dec << '\n';
++    }
++#endif  // BANK_READY_TRACE
+ #ifdef THERMAL
+     // add channel in, only needed by thermal module
+     thermal_calc_.UpdateCMDPower(channel_id_, cmd, clk_);
+diff --git a/src/controller.h b/src/controller.h
+index 77bd6af..9579b75 100644
+--- a/src/controller.h
++++ b/src/controller.h
+@@ -71,6 +71,12 @@ class Controller {
+     std::ofstream cmd_trace_;
+ #endif  // CMD_TRACE
+ 
++#ifdef BANK_READY_TRACE
++    // Read-only integration boundary for the downstream bank-link model.
++    // Each record is: issue_time_ns Read physical_address.
++    std::ofstream bank_ready_trace_;
++#endif  // BANK_READY_TRACE
++
+     // used to calculate inter-arrival latency
+     uint64_t last_trans_clk_;
+ 
+diff --git a/src/cpu.cc b/src/cpu.cc
+index 175955f..2e9b260 100644
+--- a/src/cpu.cc
++++ b/src/cpu.cc
+@@ -72,17 +72,18 @@ TraceBasedCPU::TraceBasedCPU(const std::string& config_file,
+ 
+ void TraceBasedCPU::ClockTick() {
+     memory_system_.ClockTick();
+-    if (!trace_file_.eof()) {
+-        if (get_next_) {
+-            get_next_ = false;
+-            trace_file_ >> trans_;
++    if (get_next_) {
++        if (!(trace_file_ >> trans_)) {
++            clk_++;
++            return;
+         }
+-        if (trans_.added_cycle <= clk_) {
+-            get_next_ = memory_system_.WillAcceptTransaction(trans_.addr,
+-                                                             trans_.is_write);
+-            if (get_next_) {
+-                memory_system_.AddTransaction(trans_.addr, trans_.is_write);
+-            }
++        get_next_ = false;
++    }
++    if (trans_.added_cycle <= clk_) {
++        get_next_ = memory_system_.WillAcceptTransaction(trans_.addr,
++                                                         trans_.is_write);
++        if (get_next_) {
++            memory_system_.AddTransaction(trans_.addr, trans_.is_write);
+         }
+     }
+     clk_++;
+diff --git a/src/cpu.h b/src/cpu.h
+index 9ec28e7..55c8fde 100644
+--- a/src/cpu.h
++++ b/src/cpu.h
+@@ -17,6 +17,7 @@ class CPU {
+               std::bind(&CPU::ReadCallBack, this, std::placeholders::_1),
+               std::bind(&CPU::WriteCallBack, this, std::placeholders::_1)),
+           clk_(0) {}
++    virtual ~CPU() = default;
+     virtual void ClockTick() = 0;
+     void ReadCallBack(uint64_t addr) { return; }
+     void WriteCallBack(uint64_t addr) { return; }

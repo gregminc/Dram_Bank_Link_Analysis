@@ -65,8 +65,14 @@ def parse_arguments() -> argparse.Namespace:
         default=comma_separated_ints("1,2,4,8"),
     )
     parser.add_argument("--transfer-bits", type=int, default=256)
+    parser.add_argument("--channels", type=int, default=1)
+    parser.add_argument("--ranks", type=int, default=1)
     parser.add_argument("--bank-groups", type=int, default=2)
     parser.add_argument("--banks-per-group", type=int, default=4)
+    parser.add_argument("--rows", type=int, default=65536)
+    parser.add_argument("--columns", type=int, default=1024)
+    parser.add_argument("--bus-width-bytes", type=int, default=8)
+    parser.add_argument("--burst-length", type=int, default=16)
     parser.add_argument(
         "--details-dir",
         type=Path,
@@ -113,8 +119,14 @@ def run_configuration(
     transfers_per_ns: float,
     fifo_depth: int,
     transfer_bits: int,
+    channels: int,
+    ranks: int,
     bank_groups: int,
     banks_per_group: int,
+    rows: int,
+    columns: int,
+    bus_width_bytes: int,
+    burst_length: int,
     details_dir: Path | None,
 ) -> dict[str, str]:
     command = [
@@ -131,10 +143,22 @@ def run_configuration(
         str(fifo_depth),
         "--transfer-bits",
         str(transfer_bits),
+        "--channels",
+        str(channels),
+        "--ranks",
+        str(ranks),
         "--bank-groups",
         str(bank_groups),
         "--banks-per-group",
         str(banks_per_group),
+        "--rows",
+        str(rows),
+        "--columns",
+        str(columns),
+        "--bus-width-bytes",
+        str(bus_width_bytes),
+        "--burst-length",
+        str(burst_length),
     ]
 
     if details_dir is not None:
@@ -173,8 +197,18 @@ def main() -> int:
         raise FileNotFoundError(f"Trace does not exist: {trace}")
     if arguments.transfer_bits <= 0:
         raise ValueError("--transfer-bits must be positive")
-    if arguments.bank_groups <= 0 or arguments.banks_per_group <= 0:
-        raise ValueError("bank counts must be positive")
+    geometry_values = {
+        "channels": arguments.channels,
+        "ranks": arguments.ranks,
+        "bank_groups": arguments.bank_groups,
+        "banks_per_group": arguments.banks_per_group,
+        "rows": arguments.rows,
+        "columns": arguments.columns,
+        "bus_width_bytes": arguments.bus_width_bytes,
+        "burst_length": arguments.burst_length,
+    }
+    if any(value <= 0 for value in geometry_values.values()):
+        raise ValueError("address-mapping dimensions must be positive")
 
     build_dir = arguments.build_dir.resolve()
     executable = build_dir / "bank_link_sim"
@@ -214,8 +248,14 @@ def main() -> int:
                 transfers_per_ns=rate,
                 fifo_depth=fifo_depth,
                 transfer_bits=arguments.transfer_bits,
+                channels=arguments.channels,
+                ranks=arguments.ranks,
                 bank_groups=arguments.bank_groups,
                 banks_per_group=arguments.banks_per_group,
+                rows=arguments.rows,
+                columns=arguments.columns,
+                bus_width_bytes=arguments.bus_width_bytes,
+                burst_length=arguments.burst_length,
                 details_dir=details_dir,
             )
         )
